@@ -97,6 +97,7 @@ function getPackageCache(b) {
   }, {});
 }
 
+
 function attachCacheObjectHandlers(b) {
   guard(b, 'browserify instance');
   b.on('dep', function (dep) {
@@ -111,9 +112,20 @@ function attachCacheObjectHandlers(b) {
     var pkgpath = pkg.__dirname;
 
     if (pkgpath) {
+      onPkgpath(pkgpath);
+    } else {
+      var filedir = path.dirname(file)
+      fs.exists(path.join(filedir, 'package.json'), function (exists) {
+        if (exists) onPkgpath(filedir);
+        // else throw new Error("couldn't resolve package for "+file+" from "+filedir);
+      })
+    }
+
+    function onPkgpath(pkgpath) {
+      pkg.__dirname = pkg.__dirname || pkgpath;
       co.packages[pkgpath] || (co.packages[pkgpath] = pkg);
       co.filesPackagePaths[file] || (co.filesPackagePaths[file] = pkgpath);
-      b.emit('cacheObjectsPackage', pkgpath, pkg)
+      b.emit('cacheObjectsPackage', pkgpath, pkg);
     }
   });
 }
