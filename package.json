@@ -8,6 +8,12 @@
   },
   "author": "James Friend <james@jsdf.co> (http://jsdf.co/)",
   "license": "MIT",
+  "homepage": "https://github.com/jsdf/browserify-cache-api",
+  "bugs": "https://github.com/jsdf/browserify-cache-api/issues",
+  "repository": {
+    "type": "git",
+    "url": "git://github.com/jsdf/browserify-cache-api.git"
+  },
   "dependencies": {
     "through": "^2.3.4",
     "async": "^0.9.0"
