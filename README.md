@@ -2,5 +2,13 @@
 
 api for caching and reusing discovered dependencies for browserify
 
-### coming soon
+used by [browserify-incremental](https://github.com/jsdf/browserify-incremental)
+and [browserify-assets](https://github.com/jsdf/browserify-assets)
+
+```js
+  var b = browserify(opts);
+  browserifyCache(b, opts);
+  // browserify dependency discovery and loading is now cached
+```
+
 ![under construction](http://www.oocities.org/graphickid/3d-workl.gif)
