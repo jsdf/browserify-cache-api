@@ -6,8 +6,6 @@ var assert = require('assert');
 var through = require('through2');
 var async = require('async');
 
-var Duplex = require('readable-stream/duplex');
-
 module.exports = browserifyCache;
 browserifyCache.getCacheObjects = getCacheObjects;
 browserifyCache.getModuleCache = getModuleCache;
@@ -49,34 +47,84 @@ function attachCacheObjectHooks(b) {
 function attachCacheObjectHooksToPipeline(b) {
   console.log('attachCacheObjectHooksToPipeline')
   
-  function spliceStream() {
-    b.pipeline.splice('deps', 0, getDepsStreamWithCaching(b, b._options, b._createDeps.bind(b)))
+  function splicePipeline() {
+    // this stream will hold our items until we're ready to pipe it to moduleDepsStream
+    var inputBufferStream = through.obj(logStream('inputBufferStream'));
+    // this stream will accept items from pipeline but we don't want it to produce 
+    // any output because it is piped to the wrong stream(!) as an unfortunate 
+    // result of the stream splicer pipeline's implicit piping
+    // instead we fork its output into the inputBufferStream
+    var inputSinkStream = through.obj(function(item, enc, next) {
+      inputBufferStream.write(item);
+      next();
+    }, function(done) {
+      // remove self from pipeline before ending
+      // b.pipeline.splice('deps-input-sink', 1);
+      inputBufferStream.end();
+      // done()
+    });
+    inputSinkStream.label = 'deps-input-sink'
+
+    var cachedDepsStream = getDepsStreamWithCaching(b, b._options, b._createDeps.bind(b));
+    // replicate event proxying from module deps to browserify instance and pipeline
+    proxyEventsFromModuleDepsStream(cachedDepsStream, b)
+    proxyEventsFromModuleDepsStream(cachedDepsStream, b.pipeline)
+
+    // hook up input when module deps is ready (provided with invalidated cache)
+    cachedDepsStream.on('moduleDeps', function(moduleDepsStream) {
+      inputBufferStream.pipe(moduleDepsStream);
+    });
+
+    var removed = b.pipeline.splice('deps', 1, depsStream);
+    if (removed) removed.forEach(function(s) { console.log('removed:', s.label) });
+    console.log('pipeline:', b.pipeline._streams.map(function(s){ return s.label }))
   }
 
-  spliceStream()
-  b.on('reset', spliceStream)
+  splicePipeline()
+  b.on('reset', splicePipeline)
 }
 
 // browserify 3.x/4.x compatible
 function attachCacheObjectHooksToBundler(b) {
   var bundle = b.bundle.bind(b);
-  b.bundle = function (opts_, cb) {
-    if (b._pending) return bundle(opts_, cb);
+  b.bundle = function (optsOrCb, orCb) {
+    if (b._pending) return bundle(optsOrCb, orCb);
+    var opts, cb;
     
-    if (typeof opts_ === 'function') {
-      cb = opts_;
-      opts_ = {};
+    if (typeof optsOrCb === 'function') {
+      cb = optsOrCb;
+      opts = {};
+    } else {
+      opts = optsOrCb;
+      cb = orCb;
     }
-    if (!opts_) opts_ = {};
+    opts = opts || {};
 
-    opts_.deps = function(depsOpts) {
-      return getDepsStreamWithCaching(b, depsOpts, function() {
-        return b.deps.apply(b, arguments);
-      });
-    }
+    var outputStream = through.obj();
+    invalidateCacheThen(b, function(err) {
+      if (err) return outputStream.emit('error', err);
 
-    return bundle(opts_, cb);
+      // provide invalidated module cache as module-deps 'cache' opt
+      opts.cache = getModuleCache(b);
+      // TODO: invalidate packageCache
+      opts.packageCache = getPackageCache(b);
+
+      var bundleStream = bundle(opts, cb);
+      proxyEvent('transform', bundleStream, outputStream);
+      bundleStream.pipe(outputStream);
+    });
+    return outputStream;
   };
+}
+
+function invalidateCacheThen(b, done) {
+  guard(b);
+  var co = getCacheObjects(b);
+
+  invalidateCache(co.mtimes, co.modules, function(err, invalidated) {
+    b.emit('update', invalidated);
+    done(err)
+  });
 }
 
 function getDepsStreamWithCaching(b, depsOpts, mdeps) {
@@ -87,30 +135,8 @@ function getDepsStreamWithCaching(b, depsOpts, mdeps) {
   var cachedDepsStream;
   var moduleDepsStream;
 
-  var pendingItems = [];
-
-  cachedDepsStream = new Duplex({
-    objectMode: true,
-    highWaterMark: 16,
-  });
-  cachedDepsStream.label = 'deps'
-  cachedDepsStream._read = function(size) {
-    console.log('_read')
-    if (moduleDepsStream) {
-      var item = moduleDepsStream.read(1);
-      console.log('moduleDepsStream item', item)
-      if (item) this.push(item);
-    }
-  }
-  cachedDepsStream._write = function(item, enc, next) {
-    console.log('_write', item)
-    if (moduleDepsStream) {
-      moduleDepsStream.write(item);
-    } else {
-      pendingItems.push(item);
-    }
-    next();
-  }
+  cachedDepsStream = through.obj(logStream('cachedDepsStream'));
+  cachedDepsStream.label = 'cached-deps';
 
   invalidateCache(co.mtimes, co.modules, function(err, invalidated) {
     b.emit('update', invalidated);
@@ -121,12 +147,10 @@ function getDepsStreamWithCaching(b, depsOpts, mdeps) {
     depsOpts.packageCache = getPackageCache(b);
 
     moduleDepsStream = mdeps(depsOpts);
-    // moduleDepsStream.label = 'deps';
     proxyEventsFromModuleDepsStream(moduleDepsStream, cachedDepsStream);
-    // moduleDepsStream.pipe(cachedDepsStream);
     
-    while (pendingItems.length) moduleDepsStream.write(pendingItems.shift());
-    cachedDepsStream.read(0);
+    moduleDepsStream.pipe(cachedDepsStream);
+    cachedDepsStream.emit('moduleDeps', moduleDepsStream);
   });
 
   return cachedDepsStream;
@@ -205,9 +229,9 @@ function updateCacheOnPackage(b, file, pkg) {
   }
 }
 
-function proxyEventsFromModuleDepsStream(moduleDepsStream, cachedDepsStream) {
+function proxyEventsFromModuleDepsStream(moduleDepsStream, target) {
   ['transform', 'file', 'missing', 'package'].forEach(function(eventName) {
-    proxyEvent(moduleDepsStream, cachedDepsStream, eventName);
+    proxyEvent(moduleDepsStream, target, eventName);
   });
 }
 
@@ -324,4 +348,12 @@ function proxyEvent(source, target, name) {
 function isBrowserify5x(b) {
   guard(b);
   return !!b._createPipeline;
+}
+
+
+function logStream(name) {
+  return function(obj, enc, next) {
+    console.log(name,'got object',Object.keys(obj))
+    next(null, obj)
+  }
 }
