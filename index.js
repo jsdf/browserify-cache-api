@@ -5,6 +5,9 @@ var assert = require('assert');
 
 var through = require('through2');
 var async = require('async');
+var assign = require('xtend/mutable');
+
+CONCURRENCY_LIMIT = 20;
 
 module.exports = browserifyCache;
 browserifyCache.getCacheObjects = getCacheObjects;
@@ -13,6 +16,7 @@ browserifyCache.getPackageCache = getPackageCache;
 browserifyCache.invalidateCache = invalidateCache;
 browserifyCache.invalidateModifiedFiles = invalidateModifiedFiles;
 browserifyCache.updateMtime = updateMtime;
+browserifyCache.args = { cache: {}, packageCache: {}, fullPaths: true };
 
 function browserifyCache(b, opts) {
   guard(b);
@@ -22,7 +26,10 @@ function browserifyCache(b, opts) {
 
   var cacheFile = opts.cacheFile || opts.cachefile;
 
-  loadCacheObjects(b, cacheFile);
+  var co;
+  co = loadCacheObjects(b, cacheFile);
+  // even when not loading anything, create initial cache structure
+  setCacheObjects(b, CacheObjects(co));
 
   attachCacheObjectHooks(b);
   
@@ -45,43 +52,43 @@ function attachCacheObjectHooks(b) {
 
 // browserify 5.x compatible
 function attachCacheObjectHooksToPipeline(b) {
-  console.log('attachCacheObjectHooksToPipeline')
-  
-  function splicePipeline() {
-    // this stream will hold our items until we're ready to pipe it to moduleDepsStream
-    var inputBufferStream = through.obj(logStream('inputBufferStream'));
-    // this stream will accept items from pipeline but we don't want it to produce 
-    // any output because it is piped to the wrong stream(!) as an unfortunate 
-    // result of the stream splicer pipeline's implicit piping
-    // instead we fork its output into the inputBufferStream
-    var inputSinkStream = through.obj(function(item, enc, next) {
-      inputBufferStream.write(item);
-      next();
-    }, function(done) {
-      // remove self from pipeline before ending
-      // b.pipeline.splice('deps-input-sink', 1);
-      inputBufferStream.end();
-      // done()
+  var co = getCacheObjects(b);
+
+  assert(b._options.fullPaths, "required browserify 'fullPaths' opt not set")
+  assert(b._options.cache, "required browserify 'cache' opt not set")
+  // b._options.cache is a shared object into which loaded cache data is merged.
+  // it will be reused for each build, and mutated when the cache is invalidated
+  co.modules = assign(b._options.cache, co.modules);
+
+  var bundle = b.bundle.bind(b);
+  b.bundle = function (cb) {
+    if (b._pending) return bundle(cb);
+
+    var outputStream = through.obj();
+
+    invalidateCacheBeforeBundling(b, function(err, invalidated) {
+      if (err) return outputStream.emit('error', err);
+
+      bundle(cb).pipe(outputStream);
     });
-    inputSinkStream.label = 'deps-input-sink'
+    return outputStream;
+  };
 
-    var cachedDepsStream = getDepsStreamWithCaching(b, b._options, b._createDeps.bind(b));
-    // replicate event proxying from module deps to browserify instance and pipeline
-    proxyEventsFromModuleDepsStream(cachedDepsStream, b)
-    proxyEventsFromModuleDepsStream(cachedDepsStream, b.pipeline)
+  splicePipeline(b);
+  b.on('reset', function() {
+    splicePipeline(b);
+  });
+}
 
-    // hook up input when module deps is ready (provided with invalidated cache)
-    cachedDepsStream.on('moduleDeps', function(moduleDepsStream) {
-      inputBufferStream.pipe(moduleDepsStream);
-    });
+function splicePipeline(b) {
+  guard(b);
+  var depsStream = b._createDeps(b._options);
+  depsStream.label = 'deps';
+  // replicate event proxying from module deps to browserify instance and pipeline
+  proxyEventsFromModuleDepsStream(depsStream, b)
+  proxyEventsFromModuleDepsStream(depsStream, b.pipeline)
 
-    var removed = b.pipeline.splice('deps', 1, depsStream);
-    if (removed) removed.forEach(function(s) { console.log('removed:', s.label) });
-    console.log('pipeline:', b.pipeline._streams.map(function(s){ return s.label }))
-  }
-
-  splicePipeline()
-  b.on('reset', splicePipeline)
+  b.pipeline.splice('deps', 1, depsStream);
 }
 
 // browserify 3.x/4.x compatible
@@ -89,8 +96,8 @@ function attachCacheObjectHooksToBundler(b) {
   var bundle = b.bundle.bind(b);
   b.bundle = function (optsOrCb, orCb) {
     if (b._pending) return bundle(optsOrCb, orCb);
+
     var opts, cb;
-    
     if (typeof optsOrCb === 'function') {
       cb = optsOrCb;
       opts = {};
@@ -101,7 +108,8 @@ function attachCacheObjectHooksToBundler(b) {
     opts = opts || {};
 
     var outputStream = through.obj();
-    invalidateCacheThen(b, function(err) {
+
+    invalidateCacheBeforeBundling(b, function(err, invalidated) {
       if (err) return outputStream.emit('error', err);
 
       // provide invalidated module cache as module-deps 'cache' opt
@@ -110,50 +118,22 @@ function attachCacheObjectHooksToBundler(b) {
       opts.packageCache = getPackageCache(b);
 
       var bundleStream = bundle(opts, cb);
-      proxyEvent('transform', bundleStream, outputStream);
+      proxyEvent(bundleStream, outputStream, 'transform');
       bundleStream.pipe(outputStream);
     });
     return outputStream;
   };
 }
 
-function invalidateCacheThen(b, done) {
+function invalidateCacheBeforeBundling(b, done) {
   guard(b);
   var co = getCacheObjects(b);
 
-  invalidateCache(co.mtimes, co.modules, function(err, invalidated) {
-    b.emit('update', invalidated);
-    done(err)
+  invalidateCache(co.mtimes, co.modules, function(err, invalidated, deleted) {
+    b.emit('changedDeps', invalidated, deleted);
+    b.emit('update', invalidated); // deprecated
+    done(err, invalidated);
   });
-}
-
-function getDepsStreamWithCaching(b, depsOpts, mdeps) {
-  guard(b); guard(mdeps);
-
-  var co = getCacheObjects(b);
-
-  var cachedDepsStream;
-  var moduleDepsStream;
-
-  cachedDepsStream = through.obj(logStream('cachedDepsStream'));
-  cachedDepsStream.label = 'cached-deps';
-
-  invalidateCache(co.mtimes, co.modules, function(err, invalidated) {
-    b.emit('update', invalidated);
-
-    // provide invalidated cache as module-deps 'cache' opt
-    depsOpts.cache = getModuleCache(b);
-    // TODO: invalidate packageCache
-    depsOpts.packageCache = getPackageCache(b);
-
-    moduleDepsStream = mdeps(depsOpts);
-    proxyEventsFromModuleDepsStream(moduleDepsStream, cachedDepsStream);
-    
-    moduleDepsStream.pipe(cachedDepsStream);
-    cachedDepsStream.emit('moduleDeps', moduleDepsStream);
-  });
-
-  return cachedDepsStream;
 }
 
 function attachCacheObjectDiscoveryHandlers(b) {
@@ -164,7 +144,7 @@ function attachCacheObjectDiscoveryHandlers(b) {
   });
 
   b.on('file', function (file, id, parent) {
-    console.log('got file', file, id)
+    // console.log('got file', file, id)
   });
 
   b.on('package', function (fileOrPkg, orPkg) {
@@ -194,21 +174,22 @@ function attachCacheObjectPersistHandler(b, cacheFile) {
 
 function updateCacheOnDep(b, dep) {
   var co = getCacheObjects(b);
-  if (typeof dep.id === 'string') {
-    if (dep.source) {
-      co.modules[dep.id] = dep;
-      if (!co.mtimes[dep.id]) updateMtime(co.mtimes, dep.id);
+  var file = dep.file || dep.id;
+  if (typeof file === 'string') {
+    if (dep.source != null) {
+      co.modules[file] = dep;
+      if (!co.mtimes[file]) updateMtime(co.mtimes, file);
     } else {
-      console.warn('missing source for dep', dep.id)
+      console.warn('missing source for dep', file)
     }
   } else {
-    console.warn('got dep with non string id', dep.id);
+    console.warn('got dep missing file or string id', file);
   }
 }
 
 function updateCacheOnPackage(b, file, pkg) {
+  if (isBrowserify5x(b)) return;
   var co = getCacheObjects(b);
-  // console.log('updateCacheOnPackage', file, pkg)
   var pkgpath = pkg.__dirname;
 
   if (pkgpath) {
@@ -222,6 +203,7 @@ function updateCacheOnPackage(b, file, pkg) {
   }
 
   function onPkgpath(pkgpath) {
+    guard(pkgpath)
     pkg.__dirname = pkg.__dirname || pkgpath;
     co.packages[pkgpath] || (co.packages[pkgpath] = pkg);
     co.filesPackagePaths[file] || (co.filesPackagePaths[file] = pkgpath);
@@ -261,9 +243,7 @@ function setCacheObjects(b, cacheObjects) {
 function getModuleCache(b) {
   guard(b);
   var co = getCacheObjects(b);
-  if (!Object.keys(co.modules).length) {
-    return co.modules;
-  }
+  return co.modules;
 }
 
 function getPackageCache(b) {
@@ -289,7 +269,7 @@ function storeCacheObjects(b, cacheFile) {
 
 function loadCacheObjects(b, cacheFile) {
   guard(b);
-  var co;  
+  var co = {};
   if (cacheFile && !getCacheObjects(b)) {
     try {
       co = JSON.parse(fs.readFileSync(cacheFile, {encoding: 'utf8'}));
@@ -298,8 +278,7 @@ function loadCacheObjects(b, cacheFile) {
       b.emit('_cacheFileReadError', err);
     }
   }
-  // even when not loading anything, create initial cache structure
-  setCacheObjects(b, CacheObjects(co));
+  return co;
 }
 
 function updateMtime(mtimes, file) {
@@ -317,23 +296,33 @@ function invalidateCache(mtimes, cache, done) {
 }
 
 function invalidateModifiedFiles(mtimes, files, invalidate, done) {
-  async.reduce(files, [], function(invalidated, file, fileDone) {
+  var invalidated = [];
+  var deleted = [];
+  async.eachLimit(files, CONCURRENCY_LIMIT, function(file, fileDone) {
     fs.stat(file, function (err, stat) {
-      if (err) return fileDone();
+      if (err) {
+        deleted.push(file);
+        return fileDone();
+      }
       var mtimeNew = stat.mtime.getTime();
       if(!(mtimes[file] && mtimeNew && mtimeNew <= mtimes[file])) {
         invalidate(file);
         invalidated.push(file);
       }
       mtimes[file] = mtimeNew;
-      fileDone(null, invalidated);
+      fileDone();
     });
-  }, function(err, invalidated) {
-    done(null, invalidated);
+  }, function(err) {
+    done(null, invalidated, deleted);
   });
 }
 
-// util
+// util 
+
+function isBrowserify5x(b) {
+  guard(b);
+  return !!b._createPipeline;
+}
 
 function guard(value, name) {
   assert(value, 'missing '+(name || 'argument'));
@@ -343,17 +332,4 @@ function proxyEvent(source, target, name) {
   source.on(name, function() {
     target.emit.apply(target, [name].concat(arguments));
   });
-}
-
-function isBrowserify5x(b) {
-  guard(b);
-  return !!b._createPipeline;
-}
-
-
-function logStream(name) {
-  return function(obj, enc, next) {
-    console.log(name,'got object',Object.keys(obj))
-    next(null, obj)
-  }
 }
