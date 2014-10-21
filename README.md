@@ -11,4 +11,4 @@ and [browserify-assets](https://github.com/jsdf/browserify-assets)
   // browserify dependency discovery and loading is now cached
 ```
 
-![under construction](http://www.oocities.org/graphickid/3d-workl.gif)
+![under construction](http://jamesfriend.com.au/files/under-construction.gif)
