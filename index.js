@@ -24,7 +24,7 @@ function browserifyCache(b, opts) {
 
   if (getCacheObjects(b)) return b; // already attached
 
-  var cacheFile = opts.cacheFile || opts.cachefile;
+  var cacheFile = opts.cacheFile || opts.cachefile || b._options && b._options.cacheFile || null;
 
   var co;
   co = loadCacheObjects(b, cacheFile);
