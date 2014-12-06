@@ -2,6 +2,7 @@ var fs = require('fs');
 var path = require('path');
 var util = require('util');
 var assert = require('assert');
+var splicer = require('labeled-stream-splicer');
 
 var through = require('through2');
 var async = require('async');
@@ -19,7 +20,7 @@ browserifyCache.updateMtime = updateMtime;
 browserifyCache.args = { cache: {}, packageCache: {}, fullPaths: true };
 
 function browserifyCache(b, opts) {
-  guard(b);
+  assertExists(b);
   opts = opts || {};
 
   if (getCacheObjects(b)) return b; // already attached
@@ -80,15 +81,21 @@ function attachCacheObjectHooksToPipeline(b) {
   });
 }
 
+
 function splicePipeline(b) {
-  guard(b);
+  assertExists(b);
+  // recreate module-deps with our opts
   var depsStream = b._createDeps(b._options);
-  depsStream.label = 'deps';
+  // wrap in a pipeline so we can splice in stuff after it
+  var depsPipeline = splicer.obj([
+    depsStream,
+  ]);
+  depsPipeline.label = 'deps';
   // replicate event proxying from module deps to browserify instance and pipeline
   proxyEventsFromModuleDepsStream(depsStream, b)
   proxyEventsFromModuleDepsStream(depsStream, b.pipeline)
 
-  b.pipeline.splice('deps', 1, depsStream);
+  b.pipeline.splice('deps', 1, depsPipeline);
 }
 
 // browserify 3.x/4.x compatible
@@ -126,7 +133,7 @@ function attachCacheObjectHooksToBundler(b) {
 }
 
 function invalidateCacheBeforeBundling(b, done) {
-  guard(b);
+  assertExists(b);
   var co = getCacheObjects(b);
 
   invalidateCache(co.mtimes, co.modules, function(err, invalidated, deleted) {
@@ -137,7 +144,7 @@ function invalidateCacheBeforeBundling(b, done) {
 }
 
 function attachCacheObjectDiscoveryHandlers(b) {
-  guard(b);
+  assertExists(b);
 
   b.on('dep', function (dep) {
     updateCacheOnDep(b, dep);
@@ -163,7 +170,7 @@ function attachCacheObjectDiscoveryHandlers(b) {
 }
 
 function attachCacheObjectPersistHandler(b, cacheFile) {
-  guard(b);
+  assertExists(b);
   b.on('bundle', function(bundleStream) {
     // store on completion
     bundleStream.on('end', function () {
@@ -203,7 +210,7 @@ function updateCacheOnPackage(b, file, pkg) {
   }
 
   function onPkgpath(pkgpath) {
-    guard(pkgpath)
+    assertExists(pkgpath)
     pkg.__dirname = pkg.__dirname || pkgpath;
     co.packages[pkgpath] || (co.packages[pkgpath] = pkg);
     co.filesPackagePaths[file] || (co.filesPackagePaths[file] = pkgpath);
@@ -231,23 +238,23 @@ function CacheObjects(co_) {
 }
 
 function getCacheObjects(b) {
-  guard(b);
+  assertExists(b);
   return b.__cacheObjects;
 }
 
 function setCacheObjects(b, cacheObjects) {
-  guard(b); guard(cacheObjects);
+  assertExists(b); assertExists(cacheObjects);
   b.__cacheObjects = cacheObjects;
 }
 
 function getModuleCache(b) {
-  guard(b);
+  assertExists(b);
   var co = getCacheObjects(b);
   return co.modules;
 }
 
 function getPackageCache(b) {
-  guard(b);
+  assertExists(b);
   var co = getCacheObjects(b);
   // rebuild packageCache from packages
   return Object.keys(co.filesPackagePaths).reduce(function(packageCache, file) {
@@ -257,7 +264,7 @@ function getPackageCache(b) {
 }
 
 function storeCacheObjects(b, cacheFile) {
-  guard(b);
+  assertExists(b);
   if (cacheFile) {
     var co = getCacheObjects(b);
     fs.writeFile(cacheFile, JSON.stringify(co), {encoding: 'utf8'}, function(err) {
@@ -268,7 +275,7 @@ function storeCacheObjects(b, cacheFile) {
 }
 
 function loadCacheObjects(b, cacheFile) {
-  guard(b);
+  assertExists(b);
   var co = {};
   if (cacheFile && !getCacheObjects(b)) {
     try {
@@ -282,14 +289,14 @@ function loadCacheObjects(b, cacheFile) {
 }
 
 function updateMtime(mtimes, file) {
-  guard(mtimes); guard(file);
+  assertExists(mtimes); assertExists(file);
   fs.stat(file, function (err, stat) {
     if (!err) mtimes[file] = stat.mtime.getTime();
   });
 }
 
 function invalidateCache(mtimes, cache, done) {
-  guard(mtimes);
+  assertExists(mtimes);
   invalidateModifiedFiles(mtimes, Object.keys(cache), function(file) {
     delete cache[file];
   }, done)
@@ -320,12 +327,12 @@ function invalidateModifiedFiles(mtimes, files, invalidate, done) {
 // util 
 
 function isBrowserify5x(b) {
-  guard(b);
+  assertExists(b);
   return !!b._createPipeline;
 }
 
-function guard(value, name) {
-  assert(value, 'missing '+(name || 'argument'));
+function assertExists(value, name) {
+  assert(value != null, 'missing '+(name || 'argument'));
 }
 
 function proxyEvent(source, target, name) {
