@@ -8,7 +8,7 @@ var through = require('through2');
 var async = require('async');
 var assign = require('xtend/mutable');
 
-CONCURRENCY_LIMIT = 20;
+CONCURRENCY_LIMIT = 40;
 
 module.exports = browserifyCache;
 browserifyCache.getCacheObjects = getCacheObjects;
@@ -27,10 +27,10 @@ function browserifyCache(b, opts) {
 
   var cacheFile = opts.cacheFile || opts.cachefile || b._options && b._options.cacheFile || null;
 
-  var co;
-  co = loadCacheObjects(b, cacheFile);
+  var cache;
+  cache = loadCacheObjects(b, cacheFile);
   // even when not loading anything, create initial cache structure
-  setCacheObjects(b, CacheObjects(co));
+  setCacheObjects(b, CacheObjects(cache));
 
   attachCacheObjectHooks(b);
   
@@ -53,19 +53,19 @@ function attachCacheObjectHooks(b) {
 
 // browserify 5.x compatible
 function attachCacheObjectHooksToPipeline(b) {
-  var co = getCacheObjects(b);
+  var cache = getCacheObjects(b);
 
   assert(b._options.fullPaths, "required browserify 'fullPaths' opt not set")
   assert(b._options.cache, "required browserify 'cache' opt not set")
   // b._options.cache is a shared object into which loaded cache data is merged.
   // it will be reused for each build, and mutated when the cache is invalidated
-  co.modules = assign(b._options.cache, co.modules);
+  cache.modules = assign(b._options.cache, cache.modules);
 
   var bundle = b.bundle.bind(b);
   b.bundle = function (cb) {
     if (b._pending) return bundle(cb);
 
-    var outputStream = through.obj();
+    var outputStream = makeThroughStreamFor(b);
 
     invalidateCacheBeforeBundling(b, function(err, invalidated) {
       if (err) return outputStream.emit('error', err);
@@ -114,7 +114,7 @@ function attachCacheObjectHooksToBundler(b) {
     }
     opts = opts || {};
 
-    var outputStream = through.obj();
+    var outputStream = makeThroughStreamFor(b);
 
     invalidateCacheBeforeBundling(b, function(err, invalidated) {
       if (err) return outputStream.emit('error', err);
@@ -134,12 +134,16 @@ function attachCacheObjectHooksToBundler(b) {
 
 function invalidateCacheBeforeBundling(b, done) {
   assertExists(b);
-  var co = getCacheObjects(b);
+  var cache = getCacheObjects(b);
 
-  invalidateCache(co.mtimes, co.modules, function(err, invalidated, deleted) {
-    b.emit('changedDeps', invalidated, deleted);
-    b.emit('update', invalidated); // deprecated
-    done(err, invalidated);
+  invalidateFilesPackagePaths(cache.filesPackagePaths, function() {
+    invalidatePackageCache(cache.mtimes, cache.packages, function() {
+      invalidateCache(cache.mtimes, cache.modules, function(err, invalidated, deleted) {
+        b.emit('changedDeps', invalidated, deleted);
+        b.emit('update', invalidated); // deprecated
+        done(err, invalidated);
+      });
+    });
   });
 }
 
@@ -151,7 +155,6 @@ function attachCacheObjectDiscoveryHandlers(b) {
   });
 
   b.on('file', function (file, id, parent) {
-    // console.log('got file', file, id)
   });
 
   b.on('package', function (fileOrPkg, orPkg) {
@@ -180,12 +183,12 @@ function attachCacheObjectPersistHandler(b, cacheFile) {
 }
 
 function updateCacheOnDep(b, dep) {
-  var co = getCacheObjects(b);
+  var cache = getCacheObjects(b);
   var file = dep.file || dep.id;
   if (typeof file === 'string') {
     if (dep.source != null) {
-      co.modules[file] = dep;
-      if (!co.mtimes[file]) updateMtime(co.mtimes, file);
+      cache.modules[file] = dep;
+      if (!cache.mtimes[file]) updateMtime(cache.mtimes, file);
     } else {
       console.warn('missing source for dep', file)
     }
@@ -196,25 +199,27 @@ function updateCacheOnDep(b, dep) {
 
 function updateCacheOnPackage(b, file, pkg) {
   if (isBrowserify5x(b)) return;
-  var co = getCacheObjects(b);
-  var pkgpath = pkg.__dirname;
+  var cache = getCacheObjects(b);
+  var pkgdir = pkg.__dirname;
 
-  if (pkgpath) {
-    onPkgpath(pkgpath);
+  if (pkgdir) {
+    onPkgdir(pkgdir);
   } else {
     var filedir = path.dirname(file)
+    // a feeble attempt to find package.json
+    // don't rely on this
     fs.exists(path.join(filedir, 'package.json'), function (exists) {
-      if (exists) onPkgpath(filedir);
-      // else throw new Error("couldn't resolve package for "+file+" from "+filedir);
+      if (exists) onPkgdir(filedir);
+      // else throw new Error("cacheuldn't resolve package for "+file+" from "+filedir);
     })
   }
 
-  function onPkgpath(pkgpath) {
-    assertExists(pkgpath)
-    pkg.__dirname = pkg.__dirname || pkgpath;
-    co.packages[pkgpath] || (co.packages[pkgpath] = pkg);
-    co.filesPackagePaths[file] || (co.filesPackagePaths[file] = pkgpath);
-    b.emit('cacheObjectsPackage', pkgpath, pkg);
+  function onPkgdir(pkgdir) {
+    assertExists(pkgdir)
+    pkg.__dirname = pkg.__dirname || pkgdir;
+    cache.packages[pkgdir] || (cache.packages[pkgdir] = pkg);
+    cache.filesPackagePaths[file] || (cache.filesPackagePaths[file] = pkgdir);
+    b.emit('cacheObjectsPackage', pkgdir, pkg);
   }
 }
 
@@ -226,15 +231,15 @@ function proxyEventsFromModuleDepsStream(moduleDepsStream, target) {
 
 // caching
 
-function CacheObjects(co_) {
-  var co;
+function CacheObjects(cache_) {
+  var cache;
   // cache storage structure
-  co = co_ || {};
-  co.modules = co.modules || {}; // module-deps opt 'cache'
-  co.packages = co.packages || {};  // module-deps opt 'packageCache'
-  co.mtimes = co.mtimes || {}; // maps cached file filepath to mtime when cached
-  co.filesPackagePaths = co.filesPackagePaths || {}; // maps file paths to parent package paths
-  return co;
+  cache = cache_ || {};
+  cache.modules = cache.modules || {}; // module-deps opt 'cache'
+  cache.packages = cache.packages || {};  // module-deps opt 'packageCache'
+  cache.mtimes = cache.mtimes || {}; // maps cached file filepath to mtime when cached
+  cache.filesPackagePaths = cache.filesPackagePaths || {}; // maps file paths to parent package paths
+  return cache;
 }
 
 function getCacheObjects(b) {
@@ -249,16 +254,16 @@ function setCacheObjects(b, cacheObjects) {
 
 function getModuleCache(b) {
   assertExists(b);
-  var co = getCacheObjects(b);
-  return co.modules;
+  var cache = getCacheObjects(b);
+  return cache.modules;
 }
 
 function getPackageCache(b) {
   assertExists(b);
-  var co = getCacheObjects(b);
+  var cache = getCacheObjects(b);
   // rebuild packageCache from packages
-  return Object.keys(co.filesPackagePaths).reduce(function(packageCache, file) {
-    packageCache[file] = co.packages[co.filesPackagePaths[file]];
+  return Object.keys(cache.filesPackagePaths).reduce(function(packageCache, file) {
+    packageCache[file] = cache.packages[cache.filesPackagePaths[file]];
     return packageCache;
   }, {});
 }
@@ -266,8 +271,8 @@ function getPackageCache(b) {
 function storeCacheObjects(b, cacheFile) {
   assertExists(b);
   if (cacheFile) {
-    var co = getCacheObjects(b);
-    fs.writeFile(cacheFile, JSON.stringify(co), {encoding: 'utf8'}, function(err) {
+    var cache = getCacheObjects(b);
+    fs.writeFile(cacheFile, JSON.stringify(cache), {encoding: 'utf8'}, function(err) {
       if (err) b.emit('_cacheFileWriteError', err);
       else b.emit('_cacheFileWritten', cacheFile);
     });
@@ -276,16 +281,16 @@ function storeCacheObjects(b, cacheFile) {
 
 function loadCacheObjects(b, cacheFile) {
   assertExists(b);
-  var co = {};
+  var cache = {};
   if (cacheFile && !getCacheObjects(b)) {
     try {
-      co = JSON.parse(fs.readFileSync(cacheFile, {encoding: 'utf8'}));
+      cache = JSON.parse(fs.readFileSync(cacheFile, {encoding: 'utf8'}));
     } catch (err) {
       // no existing cache file
       b.emit('_cacheFileReadError', err);
     }
   }
-  return co;
+  return cache;
 }
 
 function updateMtime(mtimes, file) {
@@ -299,6 +304,21 @@ function invalidateCache(mtimes, cache, done) {
   assertExists(mtimes);
   invalidateModifiedFiles(mtimes, Object.keys(cache), function(file) {
     delete cache[file];
+  }, done)
+}
+
+function packagePathForPackageFile(packageFilepath) {
+  packageFilepath.slice(0, packageFilepath.length - 13); // 13 == '/package.json'.length
+}
+
+function packageFileForPackagePath(packagePath) {
+  return path.join(packagePath,'package.json');
+}
+
+function invalidatePackageCache(mtimes, cache, done) {
+  assertExists(mtimes);
+  invalidateModifiedFiles(mtimes, Object.keys(cache).map(packageFileForPackagePath), function(file) {
+    delete cache[packagePathForPackageFile(file)];
   }, done)
 }
 
@@ -324,7 +344,109 @@ function invalidateModifiedFiles(mtimes, files, invalidate, done) {
   });
 }
 
+// this is a big complex blob of code to deal with the small edge case where
+// the package associated with a file changes (due to the addition or deletion
+// of a package.json file) and the previous file => package association has 
+// been cached, and thus needs to be invalidated
+function invalidateFilesPackagePaths(filesPackagePaths, done) {
+  assertExists(filesPackagePaths);
+  var packagePathsFiles = invertFilesPackagePaths(filesPackagePaths);
+  var foundPackageDirs = {};
+
+  // invalidate files contained by intermediate dir from filesPackagePaths
+  // and also remove from filesToCheck mutatively
+  function invalidateFilesForInterstitialDir(filesToCheck, interstitialDir) {
+    for (var i = filesToCheck.length-1; i >= 0; i--) {
+      var filepath = filesToCheck[i];
+      if (filepath.indexOf(interstitialDir) === 0) {
+        delete filesPackagePaths[filepath]
+        filesToCheck.splice(i, 1);
+      }
+    }
+  }
+
+  var packagePathsToCheck = Object.keys(packagePathsFiles).filter(function(pkgdir) {
+    // anything in a node_modules dir isn't likely to have it's parent package change
+    return pkgdir.indexOf('node_modules') == -1;
+  });
+
+  async.each(packagePathsToCheck, function(pkgdir, pkgdirDone) {
+    fs.exists(packageFileForPackagePath(pkgdir), function(exists) {
+      if (!exists) {
+        // invalidate file in filesPackagePaths but don't bother figuring out new package path
+        Object.keys(packagePathsFiles[pkgdir]).forEach(function(filepath) { delete filesPackagePaths[filepath]; });
+        return pkgdirDone();
+      }
+
+      // could still be a new package in an interstitial dir between current package path and file
+      foundPackageDirs[pkgdir] = true;
+      var filesToCheck = Object.keys(packagePathsFiles[pkgdir]);
+      var interstitialDirs = getInterstitialDirs(pkgdir, filesToCheck);
+
+      async.each(interstitialDirs, function(interstitialDir, interstitialDirDone) {
+        // return fast unless any left to invalidate which are contained by this intermediate dir
+        if (!(
+          filesToCheck.length 
+          && filesToCheck.some(function(filepath){ return filepath.indexOf(interstitialDir) === 0; })
+        )) return interstitialDirDone();
+
+        // invalidate and return fast if this dir is known to now be a package path
+        if (foundPackageDirs[interstitialDir]) {
+          invalidateFilesForInterstitialDir(filesToCheck, interstitialDir);
+          return interstitialDirDone();
+        }
+
+        fs.exists(packageFileForPackagePath(interstitialDir), function(exists) {
+          if (exists) {
+            foundPackageDirs[interstitialDir] = true;
+            invalidateFilesForInterstitialDir(filesToCheck, interstitialDir);
+          }
+          interstitialDirDone();
+        });
+      }, pkgdirDone);
+    });
+  }, function(err) { done(null); }); // don't really care about errors
+}
+
+// get all directories between a common base and a list of files
+function getInterstitialDirs(base, files) {
+  return Object.keys(files.reduce(function(interstitialDirs, filepath) {
+    var interstitialDir = filepath;
+    while (
+      (interstitialDir = path.dirname(interstitialDir))
+      && interstitialDir !== base
+      && !interstitialDirs[interstitialDir]
+    ) {
+      interstitialDirs[interstitialDir] = true;
+    }
+    return interstitialDirs;
+  }, {}));
+}
+
+function invertFilesPackagePaths(filesPackagePaths) {
+  var index = -1,
+      props = Object.keys(filesPackagePaths),
+      length = props.length,
+      result = {};
+
+  while (++index < length) {
+    var key = props[index];
+    var filepath = filesPackagePaths[key];
+    result[filepath] = result[filepath] || {};
+    result[filepath][key] = true;
+  }
+  return result;
+}
+
 // util 
+
+function makeThroughStreamFor(b) {
+  if (isBrowserify5x(b)) {
+    return require('through2').obj();
+  } else {
+    return require('through')()
+  }
+}
 
 function isBrowserify5x(b) {
   assertExists(b);
