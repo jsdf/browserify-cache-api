@@ -3,8 +3,8 @@ var path = require('path');
 var util = require('util');
 var assert = require('assert');
 var splicer = require('labeled-stream-splicer');
-
 var through = require('through2');
+
 var async = require('async');
 var assign = require('xtend/mutable');
 
@@ -17,6 +17,7 @@ browserifyCache.getPackageCache = getPackageCache;
 browserifyCache.invalidateCache = invalidateCache;
 browserifyCache.invalidateModifiedFiles = invalidateModifiedFiles;
 browserifyCache.updateMtime = updateMtime;
+browserifyCache.isBrowserify5x = isBrowserify5x;
 browserifyCache.args = { cache: {}, packageCache: {}, fullPaths: true };
 
 function browserifyCache(b, opts) {
@@ -65,7 +66,7 @@ function attachCacheObjectHooksToPipeline(b) {
   b.bundle = function (cb) {
     if (b._pending) return bundle(cb);
 
-    var outputStream = makeThroughStreamFor(b);
+    var outputStream = through.obj();
 
     invalidateCacheBeforeBundling(b, function(err, invalidated) {
       if (err) return outputStream.emit('error', err);
@@ -114,7 +115,7 @@ function attachCacheObjectHooksToBundler(b) {
     }
     opts = opts || {};
 
-    var outputStream = makeThroughStreamFor(b);
+    var outputStream = through.obj();
 
     invalidateCacheBeforeBundling(b, function(err, invalidated) {
       if (err) return outputStream.emit('error', err);
@@ -439,14 +440,6 @@ function invertFilesPackagePaths(filesPackagePaths) {
 }
 
 // util 
-
-function makeThroughStreamFor(b) {
-  if (isBrowserify5x(b)) {
-    return require('through2').obj();
-  } else {
-    return require('through')()
-  }
-}
 
 function isBrowserify5x(b) {
   assertExists(b);
