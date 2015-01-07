@@ -69,7 +69,12 @@ function attachCacheObjectHooksToPipeline(b) {
     invalidateCacheBeforeBundling(b, function(err, invalidated) {
       if (err) return outputStream.emit('error', err);
 
-      bundle(cb).pipe(outputStream);
+      var bundleStream = bundle(cb);
+      proxyEvent(bundleStream, outputStream, 'file');
+      proxyEvent(bundleStream, outputStream, 'package');
+      proxyEvent(bundleStream, outputStream, 'transform');
+      proxyEvent(bundleStream, outputStream, 'error');
+      bundleStream.pipe(outputStream);
     });
     return outputStream;
   };
@@ -103,6 +108,7 @@ function attachCacheObjectHooksToBundler(b) {
 
       var bundleStream = bundle(opts, cb);
       proxyEvent(bundleStream, outputStream, 'transform');
+      proxyEvent(bundleStream, outputStream, 'error');
       bundleStream.pipe(outputStream);
     });
     return outputStream;
@@ -425,6 +431,6 @@ function assertExists(value, name) {
 
 function proxyEvent(source, target, name) {
   source.on(name, function() {
-    target.emit.apply(target, [name].concat(arguments));
+    target.emit.apply(target, [name].concat([].slice.call(arguments)));
   });
 }
