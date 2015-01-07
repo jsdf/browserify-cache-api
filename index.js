@@ -33,10 +33,8 @@ function browserifyCache(b, opts) {
   // even when not loading anything, create initial cache structure
   setCacheObjects(b, CacheObjects(cache));
 
-  attachCacheObjectHooks(b);
-  
+  attachCacheObjectHooks(b);  
   attachCacheObjectDiscoveryHandlers(b);
-
   attachCacheObjectPersistHandler(b, cacheFile);
 
   return b;
@@ -75,28 +73,6 @@ function attachCacheObjectHooksToPipeline(b) {
     });
     return outputStream;
   };
-
-  splicePipeline(b);
-  b.on('reset', function() {
-    splicePipeline(b);
-  });
-}
-
-
-function splicePipeline(b) {
-  assertExists(b);
-  // recreate module-deps with our opts
-  var depsStream = b._createDeps(b._options);
-  // wrap in a pipeline so we can splice in stuff after it
-  var depsPipeline = splicer.obj([
-    depsStream,
-  ]);
-  depsPipeline.label = 'deps';
-  // replicate event proxying from module deps to browserify instance and pipeline
-  proxyEventsFromModuleDepsStream(depsStream, b)
-  proxyEventsFromModuleDepsStream(depsStream, b.pipeline)
-
-  b.pipeline.splice('deps', 1, depsPipeline);
 }
 
 // browserify 3.x/4.x compatible
@@ -153,9 +129,6 @@ function attachCacheObjectDiscoveryHandlers(b) {
 
   b.on('dep', function (dep) {
     updateCacheOnDep(b, dep);
-  });
-
-  b.on('file', function (file, id, parent) {
   });
 
   b.on('package', function (fileOrPkg, orPkg) {
