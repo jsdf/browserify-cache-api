@@ -62,8 +62,6 @@ function attachCacheObjectHooksToPipeline(b) {
 
   var bundle = b.bundle.bind(b);
   b.bundle = function (cb) {
-    if (b._pending) return bundle(cb);
-
     var outputStream = through.obj();
 
     invalidateCacheBeforeBundling(b, function(err, invalidated) {
