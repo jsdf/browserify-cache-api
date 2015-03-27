@@ -17,7 +17,6 @@ browserifyCache.getPackageCache = getPackageCache;
 browserifyCache.invalidateCache = invalidateCache;
 browserifyCache.invalidateModifiedFiles = invalidateModifiedFiles;
 browserifyCache.updateMtime = updateMtime;
-browserifyCache.isBrowserify5x = isBrowserify5x;
 browserifyCache.args = { cache: {}, packageCache: {}, fullPaths: true };
 
 function browserifyCache(b, opts) {
@@ -33,21 +32,11 @@ function browserifyCache(b, opts) {
   // even when not loading anything, create initial cache structure
   setCacheObjects(b, CacheObjects(cache));
 
-  attachCacheObjectHooks(b);  
+  attachCacheObjectHooksToPipeline(b);  
   attachCacheObjectDiscoveryHandlers(b);
   attachCacheObjectPersistHandler(b, cacheFile);
 
   return b;
-}
-
-function attachCacheObjectHooks(b) {
-  if (isBrowserify5x(b)) { 
-    // browserify 5.x
-    attachCacheObjectHooksToPipeline(b);
-  } else {
-    // browserify 3.x/4.x
-    attachCacheObjectHooksToBundler(b);
-  }
 }
 
 // browserify 5.x compatible
@@ -78,41 +67,6 @@ function attachCacheObjectHooksToPipeline(b) {
   };
 }
 
-// browserify 3.x/4.x compatible
-function attachCacheObjectHooksToBundler(b) {
-  var bundle = b.bundle.bind(b);
-  b.bundle = function (optsOrCb, orCb) {
-    if (b._pending) return bundle(optsOrCb, orCb);
-
-    var opts, cb;
-    if (typeof optsOrCb === 'function') {
-      cb = optsOrCb;
-      opts = {};
-    } else {
-      opts = optsOrCb;
-      cb = orCb;
-    }
-    opts = opts || {};
-
-    var outputStream = through.obj();
-
-    invalidateCacheBeforeBundling(b, function(err, invalidated) {
-      if (err) return outputStream.emit('error', err);
-
-      // provide invalidated module cache as module-deps 'cache' opt
-      opts.cache = getModuleCache(b);
-      // TODO: invalidate packageCache
-      opts.packageCache = getPackageCache(b);
-
-      var bundleStream = bundle(opts, cb);
-      proxyEvent(bundleStream, outputStream, 'transform');
-      proxyEvent(bundleStream, outputStream, 'error');
-      bundleStream.pipe(outputStream);
-    });
-    return outputStream;
-  };
-}
-
 function invalidateCacheBeforeBundling(b, done) {
   assertExists(b);
   var cache = getCacheObjects(b);
@@ -120,9 +74,10 @@ function invalidateCacheBeforeBundling(b, done) {
   invalidateFilesPackagePaths(cache.filesPackagePaths, function() {
     invalidatePackageCache(cache.mtimes, cache.packages, function() {
       invalidateCache(cache.mtimes, cache.modules, function(err, invalidated, deleted) {
-        b.emit('changedDeps', invalidated, deleted);
-        b.emit('update', invalidated); // deprecated
-        done(err, invalidated);
+        invalidateDependentFiles(cache, [].concat(invalidated, deleted), function(err) {
+          b.emit('changedDeps', invalidated, deleted);
+          done(err, invalidated);
+        });
       });
     });
   });
@@ -135,18 +90,10 @@ function attachCacheObjectDiscoveryHandlers(b) {
     updateCacheOnDep(b, dep);
   });
 
-  b.on('package', function (fileOrPkg, orPkg) {
-    // browserify 3.x/4.x args are (file, pkg)
-    // browserify 5.x args are (pkg)
-    var file, pkg;
-    if (!orPkg) {
-      pkg = fileOrPkg;
-      file = undefined;
-    } else {
-      file = fileOrPkg;
-      pkg = orPkg;
-    }
-    updateCacheOnPackage(b, file, pkg);
+  b.on('transform', function (transformStream, moduleFile) {
+    transformStream.on('file', function (dependentFile) {
+      updateCacheOnTransformFile(b, moduleFile, dependentFile);
+    });
   });
 }
 
@@ -158,6 +105,15 @@ function attachCacheObjectPersistHandler(b, cacheFile) {
       storeCacheObjects(b, cacheFile);
     });
   });
+}
+
+function updateCacheOnTransformFile(b, moduleFile, dependentFile) {
+  var cache = getCacheObjects(b);
+  if (cache.dependentFiles[dependentFile] == null) {
+    cache.dependentFiles[dependentFile] = {};
+  }
+  cache.dependentFiles[dependentFile][moduleFile] = true;
+  if (!cache.mtimes[dependentFile]) updateMtime(cache.mtimes, dependentFile);
 }
 
 function updateCacheOnDep(b, dep) {
@@ -175,31 +131,6 @@ function updateCacheOnDep(b, dep) {
   }
 }
 
-function updateCacheOnPackage(b, file, pkg) {
-  if (isBrowserify5x(b)) return;
-  var cache = getCacheObjects(b);
-  var pkgdir = pkg.__dirname;
-
-  if (pkgdir) {
-    onPkgdir(pkgdir);
-  } else {
-    var filedir = path.dirname(file)
-    // a feeble attempt to find package.json
-    // don't rely on this
-    fs.exists(path.join(filedir, 'package.json'), function (exists) {
-      if (exists) onPkgdir(filedir);
-      // else throw new Error("cacheuldn't resolve package for "+file+" from "+filedir);
-    })
-  }
-
-  function onPkgdir(pkgdir) {
-    assertExists(pkgdir)
-    pkg.__dirname = pkg.__dirname || pkgdir;
-    cache.packages[pkgdir] || (cache.packages[pkgdir] = pkg);
-    cache.filesPackagePaths[file] || (cache.filesPackagePaths[file] = pkgdir);
-    b.emit('cacheObjectsPackage', pkgdir, pkg);
-  }
-}
 
 function proxyEventsFromModuleDepsStream(moduleDepsStream, target) {
   ['transform', 'file', 'missing', 'package'].forEach(function(eventName) {
@@ -217,6 +148,7 @@ function CacheObjects(cache_) {
   cache.packages = cache.packages || {};  // module-deps opt 'packageCache'
   cache.mtimes = cache.mtimes || {}; // maps cached file filepath to mtime when cached
   cache.filesPackagePaths = cache.filesPackagePaths || {}; // maps file paths to parent package paths
+  cache.dependentFiles = cache.dependentFiles || {};
   return cache;
 }
 
@@ -291,6 +223,33 @@ function packagePathForPackageFile(packageFilepath) {
 
 function packageFileForPackagePath(packagePath) {
   return path.join(packagePath,'package.json');
+}
+
+function invalidateDependentFiles(cacheObjects, invalidatedModules, done) {
+  var moduleCache = cacheObjects.cache;
+  var mtimes = cacheObjects.mtimes;
+  var dependentFiles = cacheObjects.dependentFiles;
+
+  // clean up maybe-no-longer-dependent modules
+  var maybeNoLongerDependentModules = {}
+  invalidatedModules.forEach(function(module) {
+    maybeNoLongerDependentModules[module] = true;
+  });
+  Object.keys(dependentFiles).forEach(function(dependentFile) {
+    if (dependentFiles[dependentFile]) {
+      Object.keys(dependentFiles[dependentFile]).forEach(function(module) {
+        if (maybeNoLongerDependentModules[module]) {
+          delete dependentFiles[dependentFile][module];
+        }
+      });
+    }
+  });
+
+  invalidateModifiedFiles(mtimes, Object.keys(dependentFiles), function(dependentFile) {
+    Object.keys(dependentFiles[dependentFile]).forEach(function(module) {
+      delete cache[module];
+    })
+  }, function(err, invalidated, deleted) { done(err); });
 }
 
 function invalidatePackageCache(mtimes, cache, done) {
