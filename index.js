@@ -247,7 +247,7 @@ function invalidateDependentFiles(cacheObjects, invalidatedModules, done) {
 
   invalidateModifiedFiles(mtimes, Object.keys(dependentFiles), function(dependentFile) {
     Object.keys(dependentFiles[dependentFile]).forEach(function(module) {
-      delete cache[module];
+      delete cacheObjects.modules[module];
     })
   }, function(err, invalidated, deleted) { done(err); });
 }

@@ -9,6 +9,7 @@ var basedir = path.resolve(__dirname, '../')
 var outputdir = path.join(basedir, 'example','output','test','build')
 var dynamicModule = path.join(outputdir, 'dynamic.js')
 var requiresDynamicModule = path.join(outputdir, 'requires-dynamic.js')
+var dependentFile = path.join(outputdir, 'dependent.txt')
 
 test("make sure it builds and builds again", function (t) {
   // t.plan(5)
@@ -30,7 +31,6 @@ test("make sure it builds and builds again", function (t) {
       })
       .pipe(fs.createWriteStream(path.join(outputdir,'build1.js')))
       .on('finish', function () {
-
         setTimeout(function () {
           build2()
         }, 2000) // mtime resolution can be 1-2s depending on OS
@@ -51,11 +51,31 @@ test("make sure it builds and builds again", function (t) {
       .on('finish', function () {
         t.ok(true, 'built twice')
         t.ok(Object.keys(b2._options.cache).length > 0, 'cache is populated')
-        t.end()
       })
       .pipe(fs.createWriteStream(path.join(outputdir,'build2.js')))
-      
-   }
+      .on('finish', function () {
+        setTimeout(function () {
+          build3()
+        }, 2000) // mtime resolution can be 1-2s depending on OS
+      })
+  }
+
+  function build3 () {
+    // dependentFile is changed
+    fs.writeFileSync(dependentFile, 'hello')
+
+    var b3 = make()
+
+    // TODO Not sure how to assert that dynamicModule was invalidated
+
+    b3.bundle()
+      .pipe(through())
+      .on('finish', function () {
+        t.ok(true, 'built thrice')
+        t.end()
+      })
+      .pipe(fs.createWriteStream(path.join(outputdir,'build3.js')))
+  }
 })
 
 function make () {
@@ -68,6 +88,18 @@ function make () {
   browserifyCache(b)
   // b.add(path.join(basedir,'example','test-module'))
   b.add(requiresDynamicModule)
+
+  // Simulate a transform that includes "dependent.txt" in "dynamic.js"
+  b.transform(function(file, opts) {
+    if (file != dynamicModule)
+      return through();
+
+    return through(function(chunk, enc, cb) {
+      this.push(chunk);
+      this.emit('file', dependentFile);
+      cb();
+    });
+  })
 
   return b
 }
