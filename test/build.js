@@ -86,7 +86,7 @@ function make () {
 
   var b = browserify(opts)
   browserifyCache(b)
-  // b.add(path.join(basedir,'example','test-module'))
+
   b.add(requiresDynamicModule)
 
   // Simulate a transform that includes "dependent.txt" in "dynamic.js"
