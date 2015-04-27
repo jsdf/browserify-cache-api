@@ -8,7 +8,7 @@ var through = require('through2');
 var async = require('async');
 var assign = require('xtend/mutable');
 
-CONCURRENCY_LIMIT = 40;
+var CONCURRENCY_LIMIT = 40;
 
 module.exports = browserifyCache;
 browserifyCache.getCacheObjects = getCacheObjects;
