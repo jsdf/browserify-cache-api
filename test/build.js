@@ -4,6 +4,7 @@ var path = require('path')
 var through = require('through2')
 var fs = require('fs')
 var xtend = require('xtend')
+var rimraf = require('rimraf')
 
 var basedir = path.resolve(__dirname, '../')
 var outputdir = path.join(basedir, 'example','output','test','build')
@@ -13,10 +14,13 @@ var dependentFile = path.join(outputdir, 'dependent.txt')
 
 test("make sure it builds and builds again", function (t) {
   // t.plan(5)
-  execFile('mkdir', ['-p', outputdir], function (err) {
-    t.notOk(err, 'dir created')
-    fs.writeFileSync(requiresDynamicModule, 'require("./dynamic")')
-    build1()
+  rimraf(outputdir, {disableGlob:true}, function (err) {
+    t.notOk(err, 'dir removed')
+    execFile('mkdir', ['-p', outputdir], function (err) {
+      t.notOk(err, 'dir created')
+      fs.writeFileSync(requiresDynamicModule, 'require("./dynamic")')
+      build1()
+    })
   })
 
   function build1 () {
