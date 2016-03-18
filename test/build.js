@@ -13,7 +13,8 @@ var requiresDynamicModule = path.join(outputdir, 'requires-dynamic.js')
 var dependentFile = path.join(outputdir, 'dependent.txt')
 
 test("make sure it builds and builds again", function (t) {
-  // t.plan(5)
+  t.plan(7)
+
   rimraf(outputdir, {disableGlob:true}, function (err) {
     t.notOk(err, 'dir removed')
     execFile('mkdir', ['-p', outputdir], function (err) {
