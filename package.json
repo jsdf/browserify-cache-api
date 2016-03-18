@@ -4,7 +4,9 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "tap test"
+    "test": "npm run lint && tap test",
+    "lint": "eslint .",
+    "lint-fix": "eslint . --fix"
   },
   "author": "James Friend <james@jsdf.co> (http://jsdf.co/)",
   "license": "MIT",
@@ -22,6 +24,7 @@
   },
   "devDependencies": {
     "browserify": "^9.0.3",
+    "eslint": "2.4.0",
     "tap": "^0.7.1"
   }
 }
