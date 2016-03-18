@@ -47,7 +47,7 @@ test("make sure it builds and builds again", function (t) {
 
     var b2 = make()
 
-    b2.on('changedDeps', function (invalidated, deleted) {
+    b2.on('changedDeps', function (invalidated) {
       t.ok(invalidated && invalidated.length == 1, 'one file changed')
     })
 
@@ -95,7 +95,7 @@ function make () {
   b.add(requiresDynamicModule)
 
   // Simulate a transform that includes "dependent.txt" in "dynamic.js"
-  b.transform(function(file, opts) {
+  b.transform(function(file) {
     if (file != dynamicModule)
       return through();
 

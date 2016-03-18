@@ -8,10 +8,11 @@ console.timeEnd('startup')
 
 var cache = true
 
+var opts;
 if (cache) {
-  var opts = {cacheFile: __dirname+'/output/cache.json'}
+  opts = {cacheFile: __dirname+'/output/cache.json'}
 } else {
-  var opts = {}
+  opts = {}
 }
 
 console.time('cache fill')
