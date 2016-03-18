@@ -8,7 +8,7 @@ module.exports = {
     node: true,
   },
   rules: {
-    "no-console": [2, { allow: ["log", "warn", "error"] }],
+    "no-console": 0,
     // style
     "semi": 1,
     "no-extra-semi": 1,
