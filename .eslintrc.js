@@ -16,6 +16,7 @@ module.exports = {
     "array-bracket-spacing": 2,
     "block-spacing": 2,
     "comma-spacing": 2,
+    "comma-dangle": [2, "always-multiline"],
     "computed-property-spacing": 2,
     "eol-last": 2,
     "indent": [2, 2],
