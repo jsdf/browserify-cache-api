@@ -1,51 +1,48 @@
 var test = require('tap').test;
-var execFile = require('child_process').execFile;
 var path = require('path');
 var through = require('through2');
 var fs = require('fs');
-var xtend = require('xtend');
-var rimraf = require('rimraf');
 
-var basedir = path.resolve(__dirname, '../');
-var outputdir = path.join(basedir, 'example', 'output', 'test', 'build');
-var dynamicModule = path.join(outputdir, 'dynamic.js');
-var requiresDynamicModule = path.join(outputdir, 'requires-dynamic.js');
-var dependentFile = path.join(outputdir, 'dependent.txt');
+var testUtils = require('../support/testUtils');
 
-test('make sure it builds and builds again', function(t) {
+var dynamicModule = path.join(testUtils.testOutputDir, 'dynamic.js');
+var requiresDynamicModule = path.join(testUtils.testOutputDir, 'requires-dynamic.js');
+var dependentFile = path.join(testUtils.testOutputDir, 'dependent.txt');
+
+// TODO: break this into a multiple tests
+// currently it tests that cache is used, and also that dependencies from the
+// 'transform' event are used for invalidating cache (incomplete)
+test('make sure it builds a valid bundle when using cache', function(t) {
   t.plan(7);
 
-  rimraf(outputdir, {disableGlob:true}, function(err) {
-    t.notOk(err, 'dir removed');
-    execFile('mkdir', ['-p', outputdir], function(err) {
-      t.notOk(err, 'dir created');
-      fs.writeFileSync(requiresDynamicModule, 'require("./dynamic")');
-      build1();
-    });
+  testUtils.cleanupTestOutputDir((err) => {
+    t.notOk(err, 'clean up test output dir');
+
+    t.notOk(err, 'dir created');
+    fs.writeFileSync(requiresDynamicModule, 'require("./dynamic")');
+    build1();
   });
 
   function build1() {
     fs.writeFileSync(dynamicModule, 'console.log("a")');
 
-    var b1 = make();
+    var b1 = configureBrowserify(testUtils.makeBrowserify());
 
     b1.bundle()
       .pipe(through())
-      .on('finish', function() {
+      .on('finish', () => {
         t.ok(true, 'built once');
       })
-      .pipe(fs.createWriteStream(path.join(outputdir, 'build1.js')))
-      .on('finish', function() {
-        setTimeout(function() {
-          build2();
-        }, 2000); // mtime resolution can be 1-2s depending on OS
+      .pipe(fs.createWriteStream(path.join(testUtils.testOutputDir, 'build1.js')))
+      .on('finish', () => {
+        testUtils.waitForMtimeTick(build2);
       });
   }
 
   function build2() {
     fs.writeFileSync(dynamicModule, 'console.log("b")');
 
-    var b2 = make();
+    var b2 = configureBrowserify(testUtils.makeBrowserify());
 
     b2.on('changedDeps', function(invalidated) {
       t.ok(invalidated && invalidated.length == 1, 'one file changed');
@@ -53,15 +50,13 @@ test('make sure it builds and builds again', function(t) {
 
     b2.bundle()
       .pipe(through())
-      .on('finish', function() {
+      .on('finish', () => {
         t.ok(true, 'built twice');
         t.ok(Object.keys(b2._options.cache).length > 0, 'cache is populated');
       })
-      .pipe(fs.createWriteStream(path.join(outputdir, 'build2.js')))
-      .on('finish', function() {
-        setTimeout(function() {
-          build3();
-        }, 2000); // mtime resolution can be 1-2s depending on OS
+      .pipe(fs.createWriteStream(path.join(testUtils.testOutputDir, 'build2.js')))
+      .on('finish', () => {
+        testUtils.waitForMtimeTick(build3);
       });
   }
 
@@ -69,29 +64,20 @@ test('make sure it builds and builds again', function(t) {
     // dependentFile is changed
     fs.writeFileSync(dependentFile, 'hello');
 
-    var b3 = make();
-
-    // TODO Not sure how to assert that dynamicModule was invalidated
+    var b3 = configureBrowserify(testUtils.makeBrowserify());
 
     b3.bundle()
       .pipe(through())
-      .on('finish', function() {
+      .on('finish', () => {
         t.ok(true, 'built thrice');
+        // TODO: add assertion that dynamicModule was invalidated
         t.end();
       })
-      .pipe(fs.createWriteStream(path.join(outputdir, 'build3.js')));
+      .pipe(fs.createWriteStream(path.join(testUtils.testOutputDir, 'build3.js')));
   }
 });
 
-function make() {
-  var browserify = require('browserify');
-  var browserifyCache = require('../');
-
-  var opts = xtend({cacheFile: path.join(outputdir, 'cache.json')}, browserifyCache.args);
-
-  var b = browserify(opts);
-  browserifyCache(b);
-
+function configureBrowserify(b) {
   b.add(requiresDynamicModule);
 
   // Simulate a transform that includes "dependent.txt" in "dynamic.js"
