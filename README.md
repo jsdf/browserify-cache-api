@@ -12,7 +12,7 @@ Used by [browserify-incremental](https://github.com/jsdf/browserify-incremental)
     // cache and packageCache opts are required
     cache: {},
     packageCache: {},
-    // your opts...
+    // and then your opts...
   });
 
   // attach caching, specifying a location to store the cache file
