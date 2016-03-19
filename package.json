@@ -18,8 +18,7 @@
   },
   "dependencies": {
     "async": "^1.5.2",
-    "labeled-stream-splicer": "^1.0.2",
-    "through2": "^0.6.3",
+    "through2": "^2.0.0",
     "xtend": "^4.0.0"
   },
   "devDependencies": {
