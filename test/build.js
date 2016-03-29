@@ -13,7 +13,7 @@ var dependentFile = path.join(testUtils.testOutputDir, 'dependent.txt');
 // currently it tests that cache is used, and also that dependencies from the
 // 'transform' event are used for invalidating cache
 test('make sure it builds a valid bundle when using cache', function(t) {
-  t.plan(11);
+  t.plan(12);
 
   testUtils.cleanupTestOutputDir((err) => {
     t.notOk(err, 'clean up test output dir');
@@ -81,7 +81,16 @@ test('make sure it builds a valid bundle when using cache', function(t) {
         t.ok(true, 'built thrice');
         var build3 = fs.readFileSync(path.join(testUtils.testOutputDir, 'build3.js'), 'utf8');
         t.ok(build3.indexOf('foobar2') >= 0, 'bundle has new contents');
-        t.end();
+
+        testUtils.waitForMtimeTick(build4);
+      });
+  }
+
+  function build4() {
+    testUtils.makeBrowserify()
+      .require('browserify')
+      .bundle(function() {
+        t.ok(true, 'bundle callback called');
       });
   }
 });
